@@ -7,6 +7,7 @@ from random import shuffle
 import numpy as np
 
 from bda import CNNAlgorithm as alg
+import directories	# file containing locations to large dataset
 
 
 ###########################################################################################
@@ -14,8 +15,8 @@ from bda import CNNAlgorithm as alg
 
 shape_size = (3, 256, 256)
 
-slide_locations = '/labs3/amartel_data3/histology/Data/DCIS_cohort/DCIS_Training_Dataset/'
-train, val, test = utils.load_dcis_labels('/labs3/amartel_data3/histology/Data/DCIS_cohort/DCIS_Training_Dataset/CaseSetsDefined.csv')
+slide_locations = directories.IMAGE_DATA
+train, val, test = utils.load_dcis_labels(directories.IMAGE_LABELS_CSV)
 
 print("training_samples: ", len(train[0]))
 
@@ -38,7 +39,7 @@ loss_type = 'two_loss'		# two_loss/decay/single
 cnn = 'dense'		# inceptionSE/inception
 
 cnn_model_location = './models/' + modelname
-segmentation_locations = '/labs3/amartel_data3/histology/Data/DCIS_cohort/DCIS_Training_Dataset/dcis_seg/'
+segmentation_locations = directories.IMAGE_MASKS
 
 alg_instance = alg(batch_size = batch_size,
                    num_epochs = num_epochs,
