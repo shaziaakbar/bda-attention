@@ -1,8 +1,7 @@
 """
 Author: Shazia Akbar
-Email: shazia.akbar@sunnybrook.ca
 
-File: attention_update.py
+File: bda.py
 Description: Novel method for simultaneously sparsely exploring large
     WSI and then densely sampling regions of interest
     [Currently in development]
@@ -13,7 +12,6 @@ import tensorflow as tf
 sess = tf.Session()
 
 import numpy as np
-import h5py
 import glob
 import os
 import utils
@@ -25,30 +23,37 @@ from keras.utils import multi_gpu_model, to_categorical
 from keras.callbacks import ModelCheckpoint, Callback, LearningRateScheduler
 from keras.models import load_model
 from keras.layers import Input, GlobalAveragePooling2D, BatchNormalization, Dropout, Dense
-from keras.optimizers import Adam, SGD
+from keras.optimizers import Adam, SGD, Nadam
 from keras.applications.densenet import DenseNet121
 from keras.applications.inception_v3 import InceptionV3
+from keras.applications.resnet50 import ResNet50
 from se_inception_v3 import SEInceptionV3
 
+import scipy
 from scipy.misc import imread
 from skimage.morphology import binary_dilation, disk
 import matplotlib.pyplot as plt
 from openslide.lowlevel import OpenSlideError
 from skimage.morphology import binary_dilation, disk
+from scipy.ndimage import sobel, uniform_filter
+from skimage.color import rgb2hed
+from scipy.ndimage.interpolation import rotate
 
 from keras import backend as K
 K.set_image_data_format('channels_first')
 
 config = tf.ConfigProto(allow_soft_placement=True)
-config.gpu_options.per_process_gpu_memory_fraction = 0.8
 K.set_session(tf.Session(config=config))
 
+import matplotlib.pyplot as plt
+
+
 # Define global parameters
-TOPK = 5	
-RESOLUTION = 1					# level in pyramid from which to extract patches
-NUM_GPU = 1						# number of GPUs to use in experiment
-BLOCK = 10
-COARSE_STEP = 2048
+RESOLUTION = 1									# level in pyramid from which to extract patches
+NUM_GPU = 1										# number of GPUs to use in experiment
+BLOCK = 10										# parameter for determining how many slides can be loading into memory at once			
+COARSE_STEP = 2048							# step size for the sparse selection
+LOSS_TYPE = 'categorical_crossentropy'	# loss function for CNN			
 
 
 # Better method for saving multiGPU checkpoints
@@ -69,24 +74,20 @@ class ModelMGPU(Model):
 		return super(ModelMGPU, self).__getattribute__(attrname)
 
 
-# Retrieve mask from Nickil's algorithm
+
 def get_duct_mask(_filename):
-	path, name = os.path.split(_filename)
-	maskpath = path + "/dcis_seg_dilated/" + name[:-4] + "_seg.jpg"
+	"""
+	Mask implementation has been removed for privacy purposes
+	"""
 	
-	# Some mask do not exist and we will default to entire slide in these cases
-	if os.path.exists(maskpath):
-		mask = imread(maskpath).astype('bool')
-	else:
-		mask = None
-		
-	return mask
+	return None
 	
 			
 def selection_criteria(patient_file, locations, patch_size, selection_type="random"):
 	"""
 	Method for extracting patches from whole slide images - we may change this to use something more elaborate than
 	random selection later
+	
 	:param patient_file: path to svs file
 	:param locations: list of coordinates to pass to extract algorithm
 	:param patch_size: (width, height) of each patch
@@ -99,13 +100,22 @@ def selection_criteria(patient_file, locations, patch_size, selection_type="rand
 
 
 def initialize_static_attention(dims, mask=None, variance_shift=(256, 256), randomize=True):
-	# initialize regular (sparse) grid
+	"""
+	Method for create a grid across the dimensions of the whole slide image
+	
+	: param dims: original (width, height) dimensions of WSI
+	: param mask: optional mask to ignore parts of image
+	: param variance_shift: determine by how much points are randomly shift up/down/left/right
+	: param randomize: set to True if using variance_shift
+	"""
+	
+	# Initialize regular (sparse) grid
 	X, Y = np.mgrid[COARSE_STEP * 2: dims[0] - (COARSE_STEP * 2):COARSE_STEP, 
 			COARSE_STEP * 2:dims[1] - (COARSE_STEP * 2):COARSE_STEP]
 			
 	coordinates_twod = np.concatenate((X.ravel()[:, np.newaxis], Y.ravel()[:, np.newaxis]), axis=1).astype('int32')
 
-	# random shifts in x and y direction
+	# Random shifts in x and y direction
 	if randomize == True:
 		coordinates_twod = coordinates_twod.transpose(1, 0)
 		coordinates_twod[0] = coordinates_twod[0] + ((np.random.random_sample() * variance_shift[0] * 2) - variance_shift[0])
@@ -135,6 +145,9 @@ def initialize_static_attention(dims, mask=None, variance_shift=(256, 256), rand
 	return coordinates_twod
 	
 def get_total_sample_patches_in_train(training_files):
+	"""
+	Method for computing number of training instances prior to training
+	"""
 	i = 0
 	for _filename in training_files:
 		image_dims = utils.get_image_dims(_filename, resolution_level=RESOLUTION)
@@ -145,9 +158,37 @@ def get_total_sample_patches_in_train(training_files):
 		i += len(lookup_loc)
 	return i
 		
-
-def get_attention_map_for_files(model, list_filenames, recurrence_labels, patch_size):
+def get_random_coordinates(list_filenames, topk):
+	"""
+	Method added later to experiment with locations selected at random from around WSI
+	"""
 	locations = []
+
+	for idx, _filename in enumerate(list_filenames):
+		image_dims = utils.get_image_dims(_filename, resolution_level=RESOLUTION)
+		_mask = get_duct_mask(_filename)
+		
+		lookup_loc = initialize_static_attention(image_dims, mask = _mask, randomize = True)
+		ind = np.arange(len(lookup_loc))
+		np.random.shuffle(ind)
+		locations.append(lookup_loc[ind[:topk]])
+		
+	return locations	
+	
+def get_attention_map_for_files(model, list_filenames, recurrence_labels, patch_size, topk):
+	"""
+	Method for creating "attention maps" for WSI
+	Here, an attention map is the predictions generated by the network thus far (midway through training)
+	
+	:param model: the trained model from which predictions are retrieved
+	:param list_filenames: list of training data 
+	:param recurrence_labels: ground truth labels same size as list_filenames
+	:param patch_size
+	:param topk: number of locations of interest extracted for dense sampling
+	"""
+	
+	locations = []
+	model = Model([model.input], model.layers[-2].output)
 
 	for idx, _filename in enumerate(list_filenames):
 		#print(_filename)
@@ -156,7 +197,7 @@ def get_attention_map_for_files(model, list_filenames, recurrence_labels, patch_
 		image_dims = utils.get_image_dims(_filename, resolution_level=RESOLUTION)
 		_mask = get_duct_mask(_filename)
 		
-		lookup_loc = initialize_static_attention(image_dims, mask = _mask, randomize = True)	# retrieve a regular grid and densely sample around
+		lookup_loc = initialize_static_attention(image_dims, mask = _mask, randomize = False)	# retrieve a regular grid and densely sample around
 		#print(lookup_loc.shape)
 		p = []
 		
@@ -164,11 +205,15 @@ def get_attention_map_for_files(model, list_filenames, recurrence_labels, patch_
 			patches_from_file, _ = selection_criteria(_filename, lookup_loc[l:min(l + 100, len(lookup_loc))], patch_size)
 			
 			if len(patches_from_file) > 0:
+				_p = model.predict(patches_from_file).mean(axis=1)
+				
+				'''
 				if recurrence_labels[idx] == 1:
 					_p = model.predict(patches_from_file)[:, 1]
 				else:
 					_p = model.predict(patches_from_file)[:, 0]
-				
+				'''
+								
 				if len(p) == 0:
 					p = _p
 				else:
@@ -183,8 +228,7 @@ def get_attention_map_for_files(model, list_filenames, recurrence_labels, patch_
 		'''
 		sort_idx = np.argsort(np.array(p))[::-1]
 		
-		# bugfix: wrong indices selected
-		locations.append(lookup_loc[sort_idx[:TOPK]])
+		locations.append(lookup_loc[sort_idx[:topk]])
 	
 	#print(locations[0], len(locations))
 	
@@ -277,6 +321,7 @@ def minibatch_gen_task(train_files, train_seg_labels, batch_size, patch_size, at
 
 				# duplicating label
 				if len(patches_from_file) > 0:
+
 					labels = np.tile(int(train_seg_labels[j+idx]), len(patches_from_file)).astype('int32')
 					labels = to_categorical(labels, 2)
 
@@ -307,7 +352,7 @@ class CNNAlgorithm():
 	"""
 	Main class for performing an experiment on whole slide images
 	"""
-	def __init__(self, batch_size, num_epochs, shape_size, mask_locations, cnntype='inceptionSE', loss_type='decay'):
+	def __init__(self, batch_size, num_epochs, shape_size, mask_locations, cnntype='inceptionSE', loss_type='decay', topk = 5):
 		"""
 		__init__
 
@@ -325,6 +370,7 @@ class CNNAlgorithm():
 		self.segmentation_masks = mask_locations
 		self.cnn_type = cnntype
 		self.loss_type = loss_type
+		self.topk = topk
 		
 	def get_model(self):
 		"""
@@ -339,27 +385,33 @@ class CNNAlgorithm():
 			cnn_model = GlobalAveragePooling2D()(cnn_model)
 			cnn_model = BatchNormalization()(cnn_model)
 			cnn_model = Dropout(0.5)(cnn_model)
-		if self.cnn_type == "dense":
+		elif self.cnn_type == "dense":
 			i3 = DenseNet121(weights="imagenet", include_top=False, input_tensor=input_img)
 			cnn_model = i3.output
 			cnn_model = GlobalAveragePooling2D()(cnn_model)
-		elif self.cnn_type == "inceptionSE":
-			i3 = SEInceptionV3(weights="imagenet", include_top=False, input_tensor=input_img)
+		elif self.cnn_type == "resnet":
+			i3 = ResNet50(weights="imagenet", include_top=False, input_tensor=input_img)
 			cnn_model = i3.output
 			cnn_model = GlobalAveragePooling2D()(cnn_model)
-			cnn_model = BatchNormalization()(cnn_model)
-
+		elif self.cnn_type == "inceptionSE":
+			i3 = SEInceptionV3(weights=None, include_top=False, input_tensor=input_img)
+			cnn_model = i3.output
+			cnn_model = GlobalAveragePooling2D()(cnn_model)
+			#cnn_model = BatchNormalization()(cnn_model)
+			#cnn_model = Dropout(0.2)(cnn_model)
+			
 		else:
 			raise Exception('Model type specified not implemented')
 
 		dense1 = Dense(512, name='dense1')(cnn_model)
 		output = Dense(2, activation='softmax', name='p_out')(dense1)
-
+		
 		model = Model([input_img], output)
+		print(model.summary())
 		
 		return model
-
-            
+		
+   
 	def train(self, training_files, training_labels, validation_files, validation_labels, cnn_model_location, start_idx=0, decay_rate = 0.001):
 		"""
 		Main training function
@@ -383,11 +435,12 @@ class CNNAlgorithm():
 		_x = np.arange(-(COARSE_STEP / 2) , (COARSE_STEP / 2) - (patch_size[0]), patch_size[0])
 		_y = np.arange(-(COARSE_STEP / 2) , (COARSE_STEP / 2) - (patch_size[1]), patch_size[1])
 		num_dense_samples = len(_x) * len(_y)
-		total2_patches = num_dense_samples * TOPK * len(training_files)
-		total2_val_patches = num_dense_samples * TOPK * len(validation_files)
+		total2_patches = num_dense_samples * self.topk * len(training_files) 
+		total2_val_patches = num_dense_samples * self.topk * len(validation_files) 
 		print(total1_patches, total2_patches)
 		
 		# Load weight from previous epoch
+		#with tf.device('/cpu:0'):
 		base_model = self.get_model()
 		if os.path.isfile(cnn_model_location + "_checkpoints/" + 'weights.' + str(start_idx-1) + '.h5'):
 			print("Loading previous weights")
@@ -399,7 +452,7 @@ class CNNAlgorithm():
 		else:
 				parallel_model = base_model
 
-		parallel_model.compile(loss='categorical_crossentropy', optimizer='sgd')
+		parallel_model.compile(loss=LOSS_TYPE, optimizer='sgd')
 		history = LossHistory()
 		
 		checkpoint_dir = cnn_model_location + "_checkpoints"
@@ -428,9 +481,10 @@ class CNNAlgorithm():
 			return lrate
 			
 		# Initialize two different learning rates for two stages
+		# TODO: grid seach learning rate
 		if self.loss_type == 'two_losses':
-			sparse_lr = 0.001
-			dense_lr = 0.01
+			sparse_lr = 0.000001
+			dense_lr = 0.001
 		else:
 			sparse_lr = 0.01
 			dense_lr = 0.01
@@ -443,9 +497,9 @@ class CNNAlgorithm():
 				sparse_lr = sparse_lr * decay_rate
 				dense_lr = dense_lr * decay_rate
 		
+		
 		for i in range(start_idx, self.num_epochs):
-			
-			# set new learning rate
+			# Set new learning rate
 			if i != 0:
 				if self.loss_type == 'decay':
 					sparse_lr = step_decay(sparse_lr)
@@ -457,23 +511,22 @@ class CNNAlgorithm():
 				
 			# Stage 1: Coarse sampling of whole slide image
 			print("Coarse sampling... epoch " + str(i) + "/" + str(self.num_epochs))
-			# update attention map
+			
+			# Update attention map
 			parallel_model.fit_generator(
 					minibatch_gen_attention(training_files, training_labels, self.batch_size, patch_size),
 					steps_per_epoch=total1_patches // self.batch_size,
 					#validation_data = minibatch_gen_attention(validation_files, validation_labels, self.batch_size, patch_size),
 					#validation_steps = total1_val_patches // self.batch_size,
-					epochs=1, verbose=1
+					epochs=1, verbose=1, callbacks=[history]
+					#, class_weight={0:0.5, 1:1.0}
 				)
-				
-			tr=1		# hack: prevent overriding saved masks
-				
+		
 			print("Retrieving maps...")
 			
 			# Run current model and retrieve list of locations to lookup ordered by attention response
-			attention_coords = get_attention_map_for_files(parallel_model, training_files, training_labels, patch_size)
-			attention_coords_val = get_attention_map_for_files(parallel_model, validation_files, validation_labels, patch_size)
-			#print(attention_coords)
+			attention_coords = get_attention_map_for_files(parallel_model, training_files, training_labels, patch_size, self.topk)
+			attention_coords_val = get_attention_map_for_files(parallel_model, validation_files, validation_labels, patch_size, self.topk)
 			
 			if i != 0:
 				if self.loss_type == 'decay':
@@ -490,8 +543,9 @@ class CNNAlgorithm():
 					validation_data = minibatch_gen_task(validation_files, validation_labels, self.batch_size, patch_size, attention_coords_val),
 					validation_steps = total2_val_patches // self.batch_size,
 					epochs=1, verbose=1, callbacks=[history, cbk]
+					#, class_weight={0:0.5, 1:1.0}
 				)
-	
+				
 		print("completed in {:.3f}s".format(time.time() - start_time))
     
 		# Save temporary model after every epoch

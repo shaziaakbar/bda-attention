@@ -34,7 +34,7 @@ train_files, train_labels = zip(*combined)
 num_epochs = 100
 batch_size = 32
 start_epoch = 0
-modelname = 'attention-task_top5_sparse2048_switchtwolossv2_pyr1_dense_batch32_3class'
+modelname = 'attention-task_top5_sparse2048_switchtwolossv2_pyr1_dense_batch32'
 loss_type = 'two_loss'		# two_loss/decay/single
 cnn = 'dense'		# inceptionSE/inception
 
