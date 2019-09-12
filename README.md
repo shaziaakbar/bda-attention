@@ -10,6 +10,8 @@ specific regions of interest in an image.
 This method was designed to analyse whole slide images of breast tissue and the code reflects
 an experimental design for identifying cancer recurrence from large microscopic images. 
 
+Usage: python run_exp.py
+
 --------------------------------------------------------------------------- 
 
 Prerequisites:
