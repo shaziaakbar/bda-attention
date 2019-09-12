@@ -29,21 +29,25 @@ whereby the only manual input is provided at the image-level. In order to discov
 of interest, we sparsely sample a large image space for global information and pay particular 
 attention to specific ROIs by densely sampling. We call our framework Breadth-Depth Attention (BDA).
 
+![Overview of attention model](bda-overview.png)
+
 ### Details
 
-BDA is a framework which wraps around a core network architecture, the "core model", whether that
+BDA is a framework which wraps around a core network architecture, whether that
 may be a convolutional neural network, fully connected network etc. This core model progressively 
-undergoes changes at all phase of BDA and receives patches of size $d$x$d$. Therefore, when we 
-refer to a core model, we refer to the same architecture that is pre-selected before using BDA. 
+undergoes changes at all phase of BDA and receives patches of a fixed size. 
 What makes BDA different to a classical deep learning framework is that each epoch is redesigned 
-to include two types of sampling methodologies. First a regular grid with width is used to sparsely 
+to include two types of sampling techniques. First, a regular grid (with some randomization) is used to sparsely 
 sample ROIs across the entirity of each image. Then attention is placed on specific points in the 
 sparse grid by analysing areas in which the network is performing poorly via a probabilistic 
 attention map. By applied both sampling criteria in this manner we ensure that the network sufficiently 
 represents a large space, thus avoiding overfitting, whilst at the same time capturing detailed 
 information relative to a specific task.
 
-![Overview of attention model](bda-overview.png)
+This repository contains code to implement BDA for a 2-class problem on whole slide images. It also originally
+was designed to incorporate a ductal mask however this had been removed for anonymization purposes. 
+Patches in this implementation are of size 256 x 256. The extract directory is very similar to the deep-openslide repo.
+
 
 Note: this is ongoing work
 
